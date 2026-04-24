@@ -15,7 +15,7 @@ new_sqlite_classes = ["Resolver"]
 
 [[analytics_engine_datasets]]
 binding = "QUERIES"
-dataset = "doh_edge_queries"
+dataset = "doh_edge_queries_v2"
 
 [observability]
 [observability.logs]

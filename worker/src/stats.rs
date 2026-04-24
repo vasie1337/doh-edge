@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use worker::*;
 
-const DATASET: &str = "doh_edge_queries";
+const DATASET: &str = "doh_edge_queries_v2";
 const BAR_WIDTH: usize = 30;
 
 const Q_OVERALL: &str = "
@@ -59,6 +59,14 @@ GROUP BY rcode
 ORDER BY n DESC
 ";
 
+const Q_L2_HIT_TAIL: &str = "
+SELECT blob4 AS colo, count() AS n, quantileWeighted(0.95)(double1, _sample_interval) AS p95
+FROM DATASET
+WHERE timestamp > NOW() - INTERVAL '24' HOUR AND blob1 = 'L2-HIT' AND double1 > 400
+GROUP BY colo
+ORDER BY n DESC
+";
+
 const Q_COLOS: &str = "
 SELECT blob4 AS colo, count() AS n
 FROM DATASET
@@ -106,8 +114,9 @@ pub async fn render(env: &Env) -> Result<Response> {
     let qtypes = run_sql(&account_id, &token, Q_QTYPES).await?;
     let rcodes = run_sql(&account_id, &token, Q_RCODES).await?;
     let colos = run_sql(&account_id, &token, Q_COLOS).await?;
+    let l2_hit_tail = run_sql(&account_id, &token, Q_L2_HIT_TAIL).await?;
 
-    let body = render_html(&overall, &tier_latency, &top_names, &qtypes, &rcodes, &colos);
+    let body = render_html(&overall, &tier_latency, &top_names, &qtypes, &rcodes, &colos, &l2_hit_tail);
     let resp = Response::from_html(body)?;
     resp.headers().set("cache-control", "no-store")?;
     Ok(resp)
@@ -120,6 +129,7 @@ fn render_html(
     qtypes: &[serde_json::Value],
     rcodes: &[serde_json::Value],
     colos: &[serde_json::Value],
+    l2_hit_tail: &[serde_json::Value],
 ) -> String {
     let o = overall.first();
     let total = jnum(o, "total");
@@ -140,6 +150,7 @@ fn render_html(
     let qtypes_section = render_counts(qtypes, "qtype", "n");
     let rcodes_section = render_counts(rcodes, "rcode", "n");
     let colos_section = render_counts(colos, "colo", "n");
+    let l2_tail_section = render_l2_tail(l2_hit_tail);
 
     format!(
         r#"<!doctype html>
@@ -175,7 +186,9 @@ Qtype distribution
 Response codes
 {rcodes_section}
 Top colos
-{colos_section}</pre>
+{colos_section}
+Slow L2-HITs (>400ms) by colo
+{l2_tail_section}</pre>
 <p class="dim">Queries are logged to Cloudflare Analytics Engine in aggregate. Qnames are indexed for top-N computation. No client IPs are logged. ~30s ingestion lag. This is a personal PoC; do not use as your production resolver if you object.</p>
 </body>
 </html>"#
@@ -212,6 +225,20 @@ fn render_latency(rows: &[serde_json::Value]) -> String {
         out.push_str(&format!(
             "  {tier:<10} {n:>8.0}   {p50:>4.0} / {p95:>4.0} / {p99:>4.0}      {up50:>4.0} / {up95:>4.0}\n"
         ));
+    }
+    out
+}
+
+fn render_l2_tail(rows: &[serde_json::Value]) -> String {
+    if rows.is_empty() {
+        return "  (none)\n".to_string();
+    }
+    let mut out = String::from("              count   p95\n");
+    for r in rows {
+        let colo = jstr(Some(r), "colo");
+        let n = jnum(Some(r), "n");
+        let p95 = jnum(Some(r), "p95");
+        out.push_str(&format!("  {colo:<10} {n:>8.0}   {p95:>5.0}\n"));
     }
     out
 }
