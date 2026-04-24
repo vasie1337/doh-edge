@@ -29,3 +29,14 @@ DoH proxy on Cloudflare Workers. Forwards RFC 8484 queries (GET `?dns=` and POST
 - Tier header: `L2-STALE` on stale-served responses.
 - Logs: `L2-STALE-REFRESH-START` / `L2-STALE-REFRESH-DONE` / `L2-STALE-REFRESH-FAIL`.
 - Debug headers (dev/testing): `x-debug-ttl-override: <secs>` on a MISS to force a short cache TTL; `x-debug-bypass-l1: 1` to skip the L1 cache; `x-debug-force-stale: 1` to classify as StaleUsable regardless of age.
+
+## Observability
+
+- Every query writes one event to the `doh_edge_queries` Analytics Engine dataset (fire-and-forget via `ctx.wait_until`).
+- Schema: `index1 = qname`; `blob1..5 = tier, qtype_name, region, colo, rcode_name`; `double1..3 = latency_ms, upstream_latency_ms, response_bytes`. No client IPs.
+- `/stats` renders an ASCII dashboard from 6 AE SQL queries (24h window). Auto-refreshes every 30s. ~30s ingestion lag is inherent to AE.
+- Setup (one-time):
+  ```
+  npx wrangler secret put CLOUDFLARE_ACCOUNT_ID   # paste account id from dashboard
+  npx wrangler secret put ANALYTICS_API_TOKEN     # paste token with Account Analytics: Read
+  ```

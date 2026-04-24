@@ -13,6 +13,10 @@ class_name = "Resolver"
 tag = "v1"
 new_sqlite_classes = ["Resolver"]
 
+[[analytics_engine_datasets]]
+binding = "QUERIES"
+dataset = "doh_edge_queries"
+
 [observability]
 [observability.logs]
 enabled = true

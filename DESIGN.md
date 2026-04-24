@@ -54,6 +54,16 @@ At the DO only. L1 skips SWR — already sub-ms, not the bottleneck.
 - Refresh is coalesced via a `refresh_inflight` HashSet (separate from the request coalescer): the key is inserted before scheduling, removed when the refresh completes. Concurrent StaleUsable requests see the key and skip.
 - If the DO is evicted mid-refresh, the `wait_until` future may not complete — acceptable loss for DNS.
 
+## observability: Analytics Engine
+
+**AE over D1.** D1 is the tutorial answer but wrong here. The workload is append-only, high-volume, write-once-query-later telemetry. AE is purpose-built for that: writes are cheap (10M/day free tier, well under our traffic), aggregations run on ClickHouse over time windows. D1 would bottleneck on write and get expensive on the aggregations.
+
+**Log everything, no sampling.** AE's adaptive sampling on the index (qname) preserves percentile accuracy on popular names. Sampling at write time would trade marginal cost for worse p99s. Not worth it.
+
+**30s ingestion lag is the accepted tradeoff.** AE writes land in the SQL API after ~30s. The /stats page is "always 30s behind" — fine for a status dashboard, documented so it doesn't look like a bug.
+
+**What we don't log.** No client IPs, even truncated. The DNS query itself is sensitive enough; leaking the pair (client, query) defeats the point of running a resolver you trust. No per-user rate limits or identification either. Retention is AE's default (~90 days); no explicit policy layered on top.
+
 ### observations
 
 - L1 per-isolate counters bounce between requests because consecutive requests land on different isolates. Not a bug — property of the runtime.

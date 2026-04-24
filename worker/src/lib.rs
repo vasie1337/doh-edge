@@ -1,7 +1,9 @@
 mod coalesce;
 mod dns;
 mod http;
+mod metrics;
 mod resolver_do;
+mod stats;
 
 pub use resolver_do::Resolver;
 
@@ -15,15 +17,28 @@ const FETCHED_AT_HEADER: &str = "x-fetched-at";
 
 // Per-isolate counters. Not global: each edge machine runs multiple isolates,
 // and each isolate restart resets the counts. Useful for eyeball debugging via
-// response headers, not for real hit-rate measurement.
+// response headers, not for real hit-rate measurement (see Analytics Engine).
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 
 #[event(fetch)]
-async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let region = region_from(&req);
+async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
+    let url = req.url()?;
+    if url.path() == "/stats" {
+        return stats::render(&env).await;
+    }
+    handle_dns(&mut req, &env, &ctx).await
+}
 
-    let query: Vec<u8> = match req.method() {
+async fn handle_dns(req: &mut Request, env: &Env, ctx: &Context) -> Result<Response> {
+    let start_ms = now_ms();
+    let region = region_from(req);
+    let colo = req
+        .cf()
+        .map(|cf| cf.colo())
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+
+    let query = match req.method() {
         Method::Get => {
             let url = req.url()?;
             let Some((_, dns)) = url.query_pairs().find(|(k, _)| k == "dns") else {
@@ -53,8 +68,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         || force_stale
         || ttl_override.is_some();
 
-    // L1: per-edge Cache API. Skipped when a debug header is set so the
-    // request exercises the DO path where SWR lives.
+    // L1: per-edge Cache API. Bypassed when a debug header is set.
     if !bypass_l1 {
         if let Some(mut cached) = cache.get(&cache_key, true).await? {
             let fetched_at = cached
@@ -68,16 +82,19 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let hits = HITS.fetch_add(1, Ordering::Relaxed) + 1;
             let misses = MISSES.load(Ordering::Relaxed);
             console_log!("L1-HIT  {qname} {qtype} age={elapsed}s");
-            return finalize(bytes, hits, misses, None, "L1");
+            let resp = finalize(bytes.clone(), hits, misses, None, "L1")?;
+            emit_event(env, ctx, &qname, qtype, "L1", &region, &colo, &bytes, start_ms, 0.0);
+            return Ok(resp);
         }
     }
 
     let misses = MISSES.fetch_add(1, Ordering::Relaxed) + 1;
     let hits = HITS.load(Ordering::Relaxed);
-    console_log!("L1-MISS {qname} {qtype} region={region} force_stale={force_stale}");
+    console_log!("L1-MISS {qname} {qtype} region={region}");
 
-    // L2: regional Durable Object. Falls back to direct upstream on DO error.
-    let (bytes, tier) = match fetch_via_do(&env, &region, &query, force_stale, ttl_override.as_deref()).await {
+    // L2: regional DO (fallback: direct upstream on DO error).
+    let upstream_start = now_ms();
+    let (bytes, tier) = match fetch_via_do(env, &region, &query, force_stale, ttl_override.as_deref()).await {
         Ok((b, Some(s))) => (b, match s.as_str() {
             "HIT" => "L2-HIT",
             "STALE" => "L2-STALE",
@@ -89,6 +106,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             (fetch_upstream(&query).await?, "UPSTREAM")
         }
     };
+    let upstream_latency_ms = now_ms() - upstream_start;
     let (ttl, _) = dns::answer_ttl_info(&bytes);
 
     let to_cache = dns_response(bytes.clone())?;
@@ -97,9 +115,49 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     h.set(FETCHED_AT_HEADER, &now_ms().to_string())?;
     cache.put(&cache_key, to_cache).await?;
 
-    let mut out = bytes;
+    let mut out = bytes.clone();
     dns::rewrite_id(&mut out, client_id);
-    finalize(out, hits, misses, Some(ttl), tier)
+    let resp = finalize(out, hits, misses, Some(ttl), tier)?;
+    emit_event(env, ctx, &qname, qtype, tier, &region, &colo, &bytes, start_ms, upstream_latency_ms);
+    Ok(resp)
+}
+
+fn emit_event(
+    env: &Env,
+    ctx: &Context,
+    qname: &str,
+    qtype: u16,
+    tier: &str,
+    region: &str,
+    colo: &str,
+    bytes: &[u8],
+    start_ms: f64,
+    upstream_latency_ms: f64,
+) {
+    let latency_ms = now_ms() - start_ms;
+    let rcode = metrics::rcode_of(bytes);
+    let Ok(ds) = env.analytics_engine(metrics::DATASET_BINDING) else {
+        return;
+    };
+    let qname_s = qname.to_string();
+    let tier_s = tier.to_string();
+    let region_s = region.to_string();
+    let colo_s = colo.to_string();
+    let resp_bytes = bytes.len();
+    ctx.wait_until(async move {
+        let point = AnalyticsEngineDataPointBuilder::new()
+            .indexes([qname_s.as_str()])
+            .add_blob(tier_s.as_str())
+            .add_blob(metrics::qtype_name(qtype))
+            .add_blob(region_s.as_str())
+            .add_blob(colo_s.as_str())
+            .add_blob(metrics::rcode_name(rcode))
+            .add_double(latency_ms)
+            .add_double(upstream_latency_ms)
+            .add_double(resp_bytes as f64)
+            .build();
+        let _ = ds.write_data_point(&point);
+    });
 }
 
 fn region_from(req: &Request) -> String {
