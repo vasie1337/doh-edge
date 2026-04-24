@@ -43,10 +43,20 @@ Unit-test the coalescer in isolation.
 
 ### non-goals for this slice
 
-Persistent storage, stale-while-revalidate, prefetching, cross-DO metrics, multi-upstream failover. Each is its own slice.
+Persistent storage, prefetching, cross-DO metrics, multi-upstream failover. Each is its own slice.
+
+### stale-while-revalidate
+
+At the DO only. L1 skips SWR — already sub-ms, not the bottleneck.
+
+- Classify: Fresh / StaleUsable / Expired. Stale window = `max(30s, ttl/10)`.
+- StaleUsable returns stale bytes and schedules a background `state.wait_until` refresh.
+- Refresh is coalesced via a `refresh_inflight` HashSet (separate from the request coalescer): the key is inserted before scheduling, removed when the refresh completes. Concurrent StaleUsable requests see the key and skip.
+- If the DO is evicted mid-refresh, the `wait_until` future may not complete — acceptable loss for DNS.
 
 ### observations
 
 - L1 per-isolate counters bounce between requests because consecutive requests land on different isolates. Not a bug — property of the runtime.
 - 204s → 197s TTL decrement across an 8s sleep confirmed in prod (example.com, A).
 - Coalescing verified in prod: 15 concurrent requests for a fresh qname → 10 L1-MISSes land on the DO → exactly **1** `DO-UPSTREAM` log per batch (across 3 batches, 3 upstream fetches total for 45 requests).
+- SWR verified in prod: prime with `x-debug-ttl-override: 3`, wait 4s, fire 20 concurrent bypass-L1 requests → **1** `DO-UPSTREAM` refresh, **1** `L2-STALE-REFRESH-START/DONE` pair.

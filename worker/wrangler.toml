@@ -12,3 +12,8 @@ class_name = "Resolver"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Resolver"]
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

@@ -47,28 +47,43 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let cache_key = format!("https://doh-edge.cache/{qname}/{qtype}");
     let cache = Cache::default();
 
-    // L1: per-edge Cache API.
-    if let Some(mut cached) = cache.get(&cache_key, true).await? {
-        let fetched_at = cached
-            .headers()
-            .get(FETCHED_AT_HEADER)?
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or_else(now_ms);
-        let mut bytes = cached.bytes().await?;
-        let elapsed = ((now_ms() - fetched_at) / 1000.0).max(0.0) as u32;
-        dns::apply_cache_hit(&mut bytes, client_id, elapsed);
-        let (hits, misses) = (HITS.fetch_add(1, Ordering::Relaxed) + 1, MISSES.load(Ordering::Relaxed));
-        console_log!("L1-HIT  {qname} {qtype} age={elapsed}s");
-        return finalize(bytes, hits, misses, None, "L1");
+    let force_stale = req.headers().get("x-debug-force-stale")?.is_some();
+    let ttl_override = req.headers().get("x-debug-ttl-override")?;
+    let bypass_l1 = req.headers().get("x-debug-bypass-l1")?.is_some()
+        || force_stale
+        || ttl_override.is_some();
+
+    // L1: per-edge Cache API. Skipped when a debug header is set so the
+    // request exercises the DO path where SWR lives.
+    if !bypass_l1 {
+        if let Some(mut cached) = cache.get(&cache_key, true).await? {
+            let fetched_at = cached
+                .headers()
+                .get(FETCHED_AT_HEADER)?
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_else(now_ms);
+            let mut bytes = cached.bytes().await?;
+            let elapsed = ((now_ms() - fetched_at) / 1000.0).max(0.0) as u32;
+            dns::apply_cache_hit(&mut bytes, client_id, elapsed);
+            let hits = HITS.fetch_add(1, Ordering::Relaxed) + 1;
+            let misses = MISSES.load(Ordering::Relaxed);
+            console_log!("L1-HIT  {qname} {qtype} age={elapsed}s");
+            return finalize(bytes, hits, misses, None, "L1");
+        }
     }
 
-    let (misses, hits) = (MISSES.fetch_add(1, Ordering::Relaxed) + 1, HITS.load(Ordering::Relaxed));
-    console_log!("L1-MISS {qname} {qtype} region={region}");
+    let misses = MISSES.fetch_add(1, Ordering::Relaxed) + 1;
+    let hits = HITS.load(Ordering::Relaxed);
+    console_log!("L1-MISS {qname} {qtype} region={region} force_stale={force_stale}");
 
     // L2: regional Durable Object. Falls back to direct upstream on DO error.
-    let (bytes, tier) = match fetch_via_do(&env, &region, &query).await {
-        Ok((b, Some(s))) if s == "HIT" => (b, "L2-HIT"),
-        Ok((b, _)) => (b, "L2-MISS"),
+    let (bytes, tier) = match fetch_via_do(&env, &region, &query, force_stale, ttl_override.as_deref()).await {
+        Ok((b, Some(s))) => (b, match s.as_str() {
+            "HIT" => "L2-HIT",
+            "STALE" => "L2-STALE",
+            _ => "L2-MISS",
+        }),
+        Ok((b, None)) => (b, "L2-MISS"),
         Err(e) => {
             console_log!("DO error ({e}), falling back to upstream");
             (fetch_upstream(&query).await?, "UPSTREAM")
@@ -97,10 +112,18 @@ async fn fetch_via_do(
     env: &Env,
     region: &str,
     query: &[u8],
+    force_stale: bool,
+    ttl_override: Option<&str>,
 ) -> Result<(Vec<u8>, Option<String>)> {
     let ns = env.durable_object(DO_BINDING)?;
     let stub = ns.id_from_name(&format!("region:{region}"))?.get_stub()?;
     let init = http::dns_post_init(query)?;
+    if force_stale {
+        init.headers.set("x-debug-force-stale", "1")?;
+    }
+    if let Some(v) = ttl_override {
+        init.headers.set("x-debug-ttl-override", v)?;
+    }
     let inner_req = Request::new_with_init("https://do/resolve", &init)?;
     let mut resp = stub.fetch_with_request(inner_req).await?;
     let status = resp.headers().get("x-do-status")?;

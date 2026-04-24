@@ -19,3 +19,13 @@ DoH proxy on Cloudflare Workers. Forwards RFC 8484 queries (GET `?dns=` and POST
 - Request coalescing: N concurrent misses for the same key share 1 upstream fetch via a single-threaded async coalescer (`worker/src/coalesce.rs`, unit-tested).
 - `X-Cache-Tier: L1 | L2-HIT | L2-MISS | UPSTREAM` response header.
 - DO logs `DO-UPSTREAM <qname> <qtype>` only when the leader actually fires to `1.1.1.1`.
+
+## Stale-while-revalidate (L2 only)
+
+- Classify each entry as Fresh / StaleUsable / Expired. Stale window = `max(30s, ttl/10)`.
+- StaleUsable: return stale bytes immediately, schedule a background refresh via `state.wait_until`.
+- Refresh is coalesced via a `refresh_inflight` set — N concurrent stale hits → 1 upstream fetch.
+- Expired: treated as a miss, blocks on upstream.
+- Tier header: `L2-STALE` on stale-served responses.
+- Logs: `L2-STALE-REFRESH-START` / `L2-STALE-REFRESH-DONE` / `L2-STALE-REFRESH-FAIL`.
+- Debug headers (dev/testing): `x-debug-ttl-override: <secs>` on a MISS to force a short cache TTL; `x-debug-bypass-l1: 1` to skip the L1 cache; `x-debug-force-stale: 1` to classify as StaleUsable regardless of age.
