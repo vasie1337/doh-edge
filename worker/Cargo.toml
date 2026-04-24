@@ -1,0 +1,12 @@
+[package]
+name = "doh-edge-worker"
+version = "0.1.0"
+edition = "2021"
+authors = ["vasie1337 <vasie1337@gmail.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.8.1" }
+worker-macros = { version = "0.8" }
