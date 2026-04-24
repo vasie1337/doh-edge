@@ -1,42 +1,50 @@
 # doh-edge
 
-DoH proxy on Cloudflare Workers. Forwards RFC 8484 queries (GET `?dns=` and POST `application/dns-message`) to `1.1.1.1`.
+Edge DNS-over-HTTPS resolver on Cloudflare Workers. Rust.
 
-## Cache (tier 1: worker-local)
+- endpoint: https://dns.vasie.dev/dns-query
+- stats: https://dns.vasie.dev/stats
 
-- Key: `https://doh-edge.cache/{qname}/{qtype}`, qname lowercased.
-- QCLASS and EDNS(0) OPT records ignored for keying.
-- TTL = min TTL across answer records, or 60s for empty/NXDOMAIN.
-- On put: `Cache-Control: max-age=<ttl>` + `X-Fetched-At` stamp.
-- On hit: decrement answer TTLs by elapsed seconds, rewrite TX ID to match request.
-- `X-Cache-Hits` / `X-Cache-Misses` response headers are per-isolate, not global.
-- `MISS`/`HIT` logged via `console_log!`.
+## what it does
 
-## Cache (tier 2: regional Durable Object)
+- RFC 8484 DoH (GET `?dns=` and POST `application/dns-message`)
+- L1 cache: Workers Cache API, per edge machine
+- L2 cache: one Durable Object per continent, in-memory
+- request coalescing at L2
+- stale-while-revalidate at L2, window = max(30s, ttl/10)
+- upstream is 1.1.1.1
+- every query logged to Analytics Engine, dashboard at `/stats`
 
-- One DO per continent. Worker routes L1 misses to `region:<continent>` (from `cf.continent`).
-- DO state: in-memory `HashMap<(qname, qtype), (bytes, fetched_at, ttl)>`. No persistent storage.
-- Request coalescing: N concurrent misses for the same key share 1 upstream fetch via a single-threaded async coalescer (`worker/src/coalesce.rs`, unit-tested).
-- `X-Cache-Tier: L1 | L2-HIT | L2-MISS | UPSTREAM` response header.
-- DO logs `DO-UPSTREAM <qname> <qtype>` only when the leader actually fires to `1.1.1.1`.
+## response headers
 
-## Stale-while-revalidate (L2 only)
+- `x-cache-tier`: `L1`, `L2-HIT`, `L2-STALE`, `L2-MISS`
+- `x-upstream-ms`: fetch time to 1.1.1.1 (0 on hit)
+- `x-l2-ms`: full DO roundtrip (0 on L1)
+- `x-cache-hits` / `x-cache-misses`: per-isolate counters
 
-- Classify each entry as Fresh / StaleUsable / Expired. Stale window = `max(30s, ttl/10)`.
-- StaleUsable: return stale bytes immediately, schedule a background refresh via `state.wait_until`.
-- Refresh is coalesced via a `refresh_inflight` set — N concurrent stale hits → 1 upstream fetch.
-- Expired: treated as a miss, blocks on upstream.
-- Tier header: `L2-STALE` on stale-served responses.
-- Logs: `L2-STALE-REFRESH-START` / `L2-STALE-REFRESH-DONE` / `L2-STALE-REFRESH-FAIL`.
-- Debug headers (dev/testing): `x-debug-ttl-override: <secs>` on a MISS to force a short cache TTL; `x-debug-bypass-l1: 1` to skip the L1 cache; `x-debug-force-stale: 1` to classify as StaleUsable regardless of age.
+## cache key
 
-## Observability
+`(qname, qtype)`, qname lowercased. QCLASS and EDNS(0) OPT are ignored. TTL is min TTL across answer records, 60s for NXDOMAIN.
 
-- Every query writes one event to the `doh_edge_queries` Analytics Engine dataset (fire-and-forget via `ctx.wait_until`).
-- Schema: `index1 = qname`; `blob1..5 = tier, qtype_name, region, colo, rcode_name`; `double1..3 = latency_ms, upstream_latency_ms, response_bytes`. No client IPs.
-- `/stats` renders an ASCII dashboard from 6 AE SQL queries (24h window). Auto-refreshes every 30s. ~30s ingestion lag is inherent to AE.
-- Setup (one-time):
-  ```
-  npx wrangler secret put CLOUDFLARE_ACCOUNT_ID   # paste account id from dashboard
-  npx wrangler secret put ANALYTICS_API_TOKEN     # paste token with Account Analytics: Read
-  ```
+## debug headers
+
+- `x-debug-bypass-l1: 1`: skip L1, go straight to the DO
+- `x-debug-ttl-override: <n>`: on a miss, store with TTL = n seconds
+- `x-debug-force-stale: 1`: force StaleUsable classification
+
+## setup
+
+```
+cd worker
+npx wrangler deploy
+npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
+npx wrangler secret put ANALYTICS_API_TOKEN   # Account Analytics: Read
+```
+
+## tests
+
+```
+cd worker && cargo test --lib
+```
+
+Covers the coalescer in `worker/src/coalesce.rs`.
