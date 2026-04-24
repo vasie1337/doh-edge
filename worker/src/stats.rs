@@ -12,9 +12,9 @@ SELECT
   sum(if(blob1 = 'L2-STALE', 1, 0)) AS l2_stale,
   sum(if(blob1 = 'L2-MISS', 1, 0)) AS l2_miss,
   sum(if(blob1 = 'UPSTREAM', 1, 0)) AS upstream,
-  quantileExact(0.5)(double1) AS p50,
-  quantileExact(0.95)(double1) AS p95,
-  quantileExact(0.99)(double1) AS p99
+  quantileWeighted(0.5)(double1, _sample_interval) AS p50,
+  quantileWeighted(0.95)(double1, _sample_interval) AS p95,
+  quantileWeighted(0.99)(double1, _sample_interval) AS p99
 FROM DATASET
 WHERE timestamp > NOW() - INTERVAL '24' HOUR
 ";
@@ -23,9 +23,9 @@ const Q_TIER_LATENCY: &str = "
 SELECT
   blob1 AS tier,
   count() AS n,
-  quantileExact(0.5)(double1) AS p50,
-  quantileExact(0.95)(double1) AS p95,
-  quantileExact(0.99)(double1) AS p99
+  quantileWeighted(0.5)(double1, _sample_interval) AS p50,
+  quantileWeighted(0.95)(double1, _sample_interval) AS p95,
+  quantileWeighted(0.99)(double1, _sample_interval) AS p99
 FROM DATASET
 WHERE timestamp > NOW() - INTERVAL '24' HOUR
 GROUP BY tier
