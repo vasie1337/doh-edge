@@ -82,9 +82,8 @@ struct SqlResponse {
 }
 
 async fn run_sql(account_id: &str, token: &str, sql: &str) -> Result<Vec<serde_json::Value>> {
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{account_id}/analytics_engine/sql"
-    );
+    let url =
+        format!("https://api.cloudflare.com/client/v4/accounts/{account_id}/analytics_engine/sql");
     let body = sql.replace("DATASET", DATASET);
 
     let headers = Headers::new();
@@ -116,7 +115,15 @@ pub async fn render(env: &Env) -> Result<Response> {
     let colos = run_sql(&account_id, &token, Q_COLOS).await?;
     let l2_hit_tail = run_sql(&account_id, &token, Q_L2_HIT_TAIL).await?;
 
-    let body = render_html(&overall, &tier_latency, &top_names, &qtypes, &rcodes, &colos, &l2_hit_tail);
+    let body = render_html(
+        &overall,
+        &tier_latency,
+        &top_names,
+        &qtypes,
+        &rcodes,
+        &colos,
+        &l2_hit_tail,
+    );
     let resp = Response::from_html(body)?;
     resp.headers().set("cache-control", "no-store")?;
     Ok(resp)
@@ -139,7 +146,11 @@ fn render_html(
     let l2_miss = jnum(o, "l2_miss");
     let upstream = jnum(o, "upstream");
     let hits = l1 + l2_hit + l2_stale;
-    let hit_rate = if total > 0.0 { hits / total * 100.0 } else { 0.0 };
+    let hit_rate = if total > 0.0 {
+        hits / total * 100.0
+    } else {
+        0.0
+    };
     let p50 = jnum(o, "p50");
     let p95 = jnum(o, "p95");
     let p99 = jnum(o, "p99");
@@ -158,16 +169,14 @@ fn render_html(
 <head>
 <meta charset="utf-8">
 <meta http-equiv="refresh" content="30">
-<title>doh-edge · stats</title>
+<title>doh-edge - stats</title>
 <style>
 body {{ background: #0d1117; color: #c9d1d9; font-family: "JetBrains Mono", ui-monospace, monospace; margin: 2rem auto; max-width: 900px; padding: 0 1rem; }}
-h1 {{ color: #f0f6fc; font-weight: 500; font-size: 1.1rem; border-bottom: 1px solid #30363d; padding-bottom: .5rem; }}
 pre {{ font-size: 13px; line-height: 1.5; white-space: pre; overflow-x: auto; }}
 .dim {{ color: #8b949e; }}
 </style>
 </head>
 <body>
-<h1>doh-edge · stats · last 24h</h1>
 <pre>
 Queries         {total:>10}
 Cache hit rate  {hit_rate:>9.1}%
@@ -189,13 +198,19 @@ Top colos
 {colos_section}
 Slow L2-HITs (>400ms) by colo
 {l2_tail_section}</pre>
-<p class="dim">Queries are logged to Cloudflare Analytics Engine in aggregate. Qnames are indexed for top-N computation. No client IPs are logged. ~30s ingestion lag. This is a personal PoC; do not use as your production resolver if you object.</p>
 </body>
 </html>"#
     )
 }
 
-fn render_tier_dist(total: f64, l1: f64, l2_hit: f64, l2_stale: f64, l2_miss: f64, upstream: f64) -> String {
+fn render_tier_dist(
+    total: f64,
+    l1: f64,
+    l2_hit: f64,
+    l2_stale: f64,
+    l2_miss: f64,
+    upstream: f64,
+) -> String {
     let mut out = String::new();
     for (label, n) in [
         ("L1", l1),
@@ -205,7 +220,11 @@ fn render_tier_dist(total: f64, l1: f64, l2_hit: f64, l2_stale: f64, l2_miss: f6
         ("UPSTREAM", upstream),
     ] {
         let pct = if total > 0.0 { n / total * 100.0 } else { 0.0 };
-        let bar_len = if total > 0.0 { (n / total * BAR_WIDTH as f64) as usize } else { 0 };
+        let bar_len = if total > 0.0 {
+            (n / total * BAR_WIDTH as f64) as usize
+        } else {
+            0
+        };
         let bar = "█".repeat(bar_len);
         out.push_str(&format!("  {label:<10} {bar:<30} {pct:>5.1}%  {n:>8.0}\n"));
     }
@@ -255,12 +274,19 @@ fn render_counts(rows: &[serde_json::Value], key: &str, val: &str) -> String {
 
 fn jnum(v: Option<&serde_json::Value>, k: &str) -> f64 {
     v.and_then(|v| v.get(k))
-        .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|x| {
+            x.as_f64()
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(0.0)
 }
 
 fn jstr(v: Option<&serde_json::Value>, k: &str) -> String {
     v.and_then(|v| v.get(k))
-        .map(|x| x.as_str().map(String::from).unwrap_or_else(|| x.to_string()))
+        .map(|x| {
+            x.as_str()
+                .map(String::from)
+                .unwrap_or_else(|| x.to_string())
+        })
         .unwrap_or_default()
 }
