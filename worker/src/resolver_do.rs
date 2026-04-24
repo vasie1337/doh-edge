@@ -88,19 +88,21 @@ impl DurableObject for Resolver {
             Some(Status::Fresh { elapsed }) => {
                 let bytes = serve_from_cache(&self.cache, &key, client_id, elapsed)
                     .expect("entry still present");
-                with_status(bytes, "HIT")
+                with_status(bytes, "HIT", 0.0)
             }
             Some(Status::StaleUsable { elapsed }) => {
                 let bytes = serve_from_cache(&self.cache, &key, client_id, elapsed)
                     .expect("entry still present");
                 self.schedule_refresh(key, query);
-                with_status(bytes, "STALE")
+                with_status(bytes, "STALE", 0.0)
             }
             Some(Status::Expired) | None => {
+                let upstream_start = now_ms();
                 let bytes = self.fetch_and_store(key.clone(), &query, ttl_override).await?;
+                let upstream_ms = now_ms() - upstream_start;
                 let mut out = bytes;
                 dns::rewrite_id(&mut out, client_id);
-                with_status(out, "MISS")
+                with_status(out, "MISS", upstream_ms)
             }
         }
     }
@@ -173,8 +175,10 @@ fn store(cache: &Cache, key: Key, bytes: &[u8], ttl_override: Option<u32>) {
     );
 }
 
-fn with_status(bytes: Vec<u8>, status: &str) -> Result<Response> {
+fn with_status(bytes: Vec<u8>, status: &str, upstream_ms: f64) -> Result<Response> {
     let resp = http::dns_response(bytes)?;
-    resp.headers().set("x-do-status", status)?;
+    let h = resp.headers();
+    h.set("x-do-status", status)?;
+    h.set("x-upstream-ms", &format!("{upstream_ms:.1}"))?;
     Ok(resp)
 }

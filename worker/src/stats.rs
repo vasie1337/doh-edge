@@ -25,7 +25,9 @@ SELECT
   count() AS n,
   quantileWeighted(0.5)(double1, _sample_interval) AS p50,
   quantileWeighted(0.95)(double1, _sample_interval) AS p95,
-  quantileWeighted(0.99)(double1, _sample_interval) AS p99
+  quantileWeighted(0.99)(double1, _sample_interval) AS p99,
+  quantileWeighted(0.5)(double2, _sample_interval) AS up50,
+  quantileWeighted(0.95)(double2, _sample_interval) AS up95
 FROM DATASET
 WHERE timestamp > NOW() - INTERVAL '24' HOUR
 GROUP BY tier
@@ -164,7 +166,7 @@ p99 latency     {p99:>9.0} ms
 
 Tier distribution
 {tier_section}
-Latency by tier (count / p50 / p95 / p99, ms)
+Latency by tier (ms)
 {latency_section}
 Top 20 queried names
 {names_section}
@@ -198,15 +200,17 @@ fn render_tier_dist(total: f64, l1: f64, l2_hit: f64, l2_stale: f64, l2_miss: f6
 }
 
 fn render_latency(rows: &[serde_json::Value]) -> String {
-    let mut out = String::new();
+    let mut out = String::from("              count   total p50/p95/p99      upstream p50/p95\n");
     for r in rows {
         let tier = jstr(Some(r), "tier");
         let n = jnum(Some(r), "n");
         let p50 = jnum(Some(r), "p50");
         let p95 = jnum(Some(r), "p95");
         let p99 = jnum(Some(r), "p99");
+        let up50 = jnum(Some(r), "up50");
+        let up95 = jnum(Some(r), "up95");
         out.push_str(&format!(
-            "  {tier:<10} {n:>8.0}   {p50:>5.0} / {p95:>5.0} / {p99:>5.0}\n"
+            "  {tier:<10} {n:>8.0}   {p50:>4.0} / {p95:>4.0} / {p99:>4.0}      {up50:>4.0} / {up95:>4.0}\n"
         ));
     }
     out

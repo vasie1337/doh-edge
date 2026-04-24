@@ -83,7 +83,7 @@ async fn handle_dns(req: &mut Request, env: &Env, ctx: &Context) -> Result<Respo
             let misses = MISSES.load(Ordering::Relaxed);
             console_log!("L1-HIT  {qname} {qtype} age={elapsed}s");
             let resp = finalize(bytes.clone(), hits, misses, None, "L1")?;
-            emit_event(env, ctx, &qname, qtype, "L1", &region, &colo, &bytes, start_ms, 0.0);
+            emit_event(env, ctx, &qname, qtype, "L1", &region, &colo, &bytes, start_ms, 0.0, 0.0);
             return Ok(resp);
         }
     }
@@ -92,21 +92,23 @@ async fn handle_dns(req: &mut Request, env: &Env, ctx: &Context) -> Result<Respo
     let hits = HITS.load(Ordering::Relaxed);
     console_log!("L1-MISS {qname} {qtype} region={region}");
 
-    // L2: regional DO (fallback: direct upstream on DO error).
-    let upstream_start = now_ms();
-    let (bytes, tier) = match fetch_via_do(env, &region, &query, force_stale, ttl_override.as_deref()).await {
-        Ok((b, Some(s))) => (b, match s.as_str() {
+    // L2: regional DO (fallback: direct upstream on DO error — not expected in prod).
+    let l2_start = now_ms();
+    let (bytes, tier, upstream_ms) = match fetch_via_do(env, &region, &query, force_stale, ttl_override.as_deref()).await {
+        Ok((b, Some(s), u_ms)) => (b, match s.as_str() {
             "HIT" => "L2-HIT",
             "STALE" => "L2-STALE",
             _ => "L2-MISS",
-        }),
-        Ok((b, None)) => (b, "L2-MISS"),
+        }, u_ms),
+        Ok((b, None, u_ms)) => (b, "L2-MISS", u_ms),
         Err(e) => {
             console_log!("DO error ({e}), falling back to upstream");
-            (fetch_upstream(&query).await?, "UPSTREAM")
+            let up_start = now_ms();
+            let b = fetch_upstream(&query).await?;
+            (b, "UPSTREAM", now_ms() - up_start)
         }
     };
-    let upstream_latency_ms = now_ms() - upstream_start;
+    let l2_roundtrip_ms = now_ms() - l2_start;
     let (ttl, _) = dns::answer_ttl_info(&bytes);
 
     let to_cache = dns_response(bytes.clone())?;
@@ -118,7 +120,9 @@ async fn handle_dns(req: &mut Request, env: &Env, ctx: &Context) -> Result<Respo
     let mut out = bytes.clone();
     dns::rewrite_id(&mut out, client_id);
     let resp = finalize(out, hits, misses, Some(ttl), tier)?;
-    emit_event(env, ctx, &qname, qtype, tier, &region, &colo, &bytes, start_ms, upstream_latency_ms);
+    resp.headers().set("x-upstream-ms", &format!("{upstream_ms:.1}"))?;
+    resp.headers().set("x-l2-ms", &format!("{l2_roundtrip_ms:.1}"))?;
+    emit_event(env, ctx, &qname, qtype, tier, &region, &colo, &bytes, start_ms, upstream_ms, l2_roundtrip_ms);
     Ok(resp)
 }
 
@@ -132,7 +136,8 @@ fn emit_event(
     colo: &str,
     bytes: &[u8],
     start_ms: f64,
-    upstream_latency_ms: f64,
+    upstream_ms: f64,
+    l2_roundtrip_ms: f64,
 ) {
     let latency_ms = now_ms() - start_ms;
     let rcode = metrics::rcode_of(bytes);
@@ -153,8 +158,9 @@ fn emit_event(
             .add_blob(colo_s.as_str())
             .add_blob(metrics::rcode_name(rcode))
             .add_double(latency_ms)
-            .add_double(upstream_latency_ms)
+            .add_double(upstream_ms)
             .add_double(resp_bytes as f64)
+            .add_double(l2_roundtrip_ms)
             .build();
         let _ = ds.write_data_point(&point);
     });
@@ -172,7 +178,7 @@ async fn fetch_via_do(
     query: &[u8],
     force_stale: bool,
     ttl_override: Option<&str>,
-) -> Result<(Vec<u8>, Option<String>)> {
+) -> Result<(Vec<u8>, Option<String>, f64)> {
     let ns = env.durable_object(DO_BINDING)?;
     let stub = ns.id_from_name(&format!("region:{region}"))?.get_stub()?;
     let init = http::dns_post_init(query)?;
@@ -185,7 +191,12 @@ async fn fetch_via_do(
     let inner_req = Request::new_with_init("https://do/resolve", &init)?;
     let mut resp = stub.fetch_with_request(inner_req).await?;
     let status = resp.headers().get("x-do-status")?;
-    Ok((resp.bytes().await?, status))
+    let upstream_ms = resp
+        .headers()
+        .get("x-upstream-ms")?
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    Ok((resp.bytes().await?, status, upstream_ms))
 }
 
 fn finalize(
