@@ -13,3 +13,7 @@ worker-macros = { version = "0.8" }
 base64 = "0.22"
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+futures-channel = "0.3"
+
+[dev-dependencies]
+futures = "0.3"
