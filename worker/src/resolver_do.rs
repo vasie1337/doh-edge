@@ -1,11 +1,9 @@
 use crate::coalesce::Coalescer;
 use crate::dns;
+use crate::http::{self, now_ms};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use worker::*;
-
-const UPSTREAM: &str = "https://1.1.1.1/dns-query";
-const DNS_MSG: &str = "application/dns-message";
 
 type Key = (String, u16);
 
@@ -40,10 +38,10 @@ impl DurableObject for Resolver {
         };
         let key = (qname, qtype);
         let client_id = dns::read_id(&query);
-        let now = js_sys::Date::now();
+        let now = now_ms();
 
         if let Some(bytes) = self.serve_from_cache(&key, client_id, now) {
-            return bytes_response(bytes, "HIT");
+            return with_status(bytes, "HIT");
         }
 
         let log_key = format!("{} {}", key.0, key.1);
@@ -51,7 +49,7 @@ impl DurableObject for Resolver {
             .coalescer
             .run(key.clone(), || async {
                 console_log!("DO-UPSTREAM {log_key}");
-                fetch_upstream(&query).await.map_err(|e| e.to_string())
+                http::fetch_upstream(&query).await.map_err(|e| e.to_string())
             })
             .await;
 
@@ -69,7 +67,7 @@ impl DurableObject for Resolver {
 
         let mut out = upstream_bytes;
         dns::rewrite_id(&mut out, client_id);
-        bytes_response(out, "MISS")
+        with_status(out, "MISS")
     }
 }
 
@@ -77,39 +75,18 @@ impl Resolver {
     fn serve_from_cache(&self, key: &Key, client_id: u16, now_ms: f64) -> Option<Vec<u8>> {
         let cache = self.cache.borrow();
         let entry = cache.get(key)?;
-        let elapsed_ms = (now_ms - entry.fetched_at_ms).max(0.0);
-        let elapsed_secs = (elapsed_ms / 1000.0) as u32;
+        let elapsed_secs = ((now_ms - entry.fetched_at_ms).max(0.0) / 1000.0) as u32;
         if elapsed_secs >= entry.ttl_secs {
             return None;
         }
         let mut bytes = entry.bytes.clone();
-        let (_, offsets) = dns::answer_ttl_info(&bytes);
-        dns::decrement_ttls(&mut bytes, &offsets, elapsed_secs);
-        dns::rewrite_id(&mut bytes, client_id);
+        dns::apply_cache_hit(&mut bytes, client_id, elapsed_secs);
         Some(bytes)
     }
 }
 
-async fn fetch_upstream(query: &[u8]) -> Result<Vec<u8>> {
-    let headers = Headers::new();
-    headers.set("accept", DNS_MSG)?;
-    headers.set("content-type", DNS_MSG)?;
-
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_headers(headers)
-        .with_body(Some(wasm_bindgen::JsValue::from(
-            js_sys::Uint8Array::from(query),
-        )));
-    let upstream = Request::new_with_init(UPSTREAM, &init)?;
-    let mut resp = Fetch::Request(upstream).send().await?;
-    resp.bytes().await
-}
-
-fn bytes_response(bytes: Vec<u8>, status: &str) -> Result<Response> {
-    let mut resp = Response::from_bytes(bytes)?;
-    let h = resp.headers_mut();
-    h.set("content-type", DNS_MSG)?;
-    h.set("x-do-status", status)?;
+fn with_status(bytes: Vec<u8>, status: &str) -> Result<Response> {
+    let resp = http::dns_response(bytes)?;
+    resp.headers().set("x-do-status", status)?;
     Ok(resp)
 }

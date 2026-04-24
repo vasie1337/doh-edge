@@ -100,6 +100,14 @@ pub fn decrement_ttls(msg: &mut [u8], offsets: &[usize], elapsed_secs: u32) {
     }
 }
 
+/// Combined cache-hit transform: decrement answer TTLs by `elapsed_secs` and
+/// rewrite the transaction ID to `client_id`.
+pub fn apply_cache_hit(msg: &mut [u8], client_id: u16, elapsed_secs: u32) {
+    let (_, offsets) = answer_ttl_info(msg);
+    decrement_ttls(msg, &offsets, elapsed_secs);
+    rewrite_id(msg, client_id);
+}
+
 fn skip_name(msg: &[u8], pos: &mut usize) -> bool {
     loop {
         if *pos >= msg.len() {
