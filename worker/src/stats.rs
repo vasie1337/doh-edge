@@ -107,13 +107,15 @@ pub async fn render(env: &Env) -> Result<Response> {
     let account_id = env.secret("CLOUDFLARE_ACCOUNT_ID")?.to_string();
     let token = env.secret("ANALYTICS_API_TOKEN")?.to_string();
 
-    let overall = run_sql(&account_id, &token, Q_OVERALL).await?;
-    let tier_latency = run_sql(&account_id, &token, Q_TIER_LATENCY).await?;
-    let top_names = run_sql(&account_id, &token, Q_TOP_NAMES).await?;
-    let qtypes = run_sql(&account_id, &token, Q_QTYPES).await?;
-    let rcodes = run_sql(&account_id, &token, Q_RCODES).await?;
-    let colos = run_sql(&account_id, &token, Q_COLOS).await?;
-    let l2_hit_tail = run_sql(&account_id, &token, Q_L2_HIT_TAIL).await?;
+    let (overall, tier_latency, top_names, qtypes, rcodes, colos, l2_hit_tail) = futures_util::try_join!(
+        run_sql(&account_id, &token, Q_OVERALL),
+        run_sql(&account_id, &token, Q_TIER_LATENCY),
+        run_sql(&account_id, &token, Q_TOP_NAMES),
+        run_sql(&account_id, &token, Q_QTYPES),
+        run_sql(&account_id, &token, Q_RCODES),
+        run_sql(&account_id, &token, Q_COLOS),
+        run_sql(&account_id, &token, Q_L2_HIT_TAIL),
+    )?;
 
     let body = render_html(
         &overall,
